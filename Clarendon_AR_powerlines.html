@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Clarendon AR — Powerlines (located)</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:Arial,Helvetica,sans-serif;color:#fff}
+  #video{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0}
+  #gl{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
+  #cross{position:fixed;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;z-index:3;pointer-events:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:#F5F259}
+  #cross:before{left:16px;top:0;width:2px;height:34px}
+  #cross:after{top:16px;left:0;height:2px;width:34px}
+  .panel{position:fixed;z-index:4;background:rgba(18,51,89,.82);border:1px solid rgba(255,255,255,.25);
+         border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.45;backdrop-filter:blur(3px)}
+  #hud{top:10px;left:10px;right:10px;display:flex;justify-content:space-between;gap:10px}
+  #hud .col{flex:1}
+  #hud b{color:#F5F259}
+  #ctrl{bottom:10px;left:10px;right:10px}
+  #ctrl row, .row{display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap}
+  select,button{font-family:Arial;font-size:14px;border-radius:8px;border:1px solid #6f86a6;
+         background:#10243d;color:#fff;padding:8px 10px}
+  button.primary{background:#F5BFED;color:#123359;border-color:#F5BFED;font-weight:bold}
+  button:active{transform:translateY(1px)}
+  input[type=range]{flex:1}
+  #start{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;
+         justify-content:center;background:#123359;text-align:center;padding:24px}
+  #start h1{font-size:20px;margin:0 0 6px}
+  #start p{max-width:520px;font-size:14px;opacity:.9;line-height:1.5}
+  #start button{margin-top:18px;font-size:16px;padding:14px 22px}
+  .tag{display:inline-block;background:#575C33;border-radius:6px;padding:1px 7px;font-size:12px;margin-left:6px}
+  .warn{color:#F5BFED}
+</style>
+</head>
+<body>
+<div id="start">
+  <h1>Clarendon — Powerlines in AR</h1>
+  <p>Make sure your GNSS receiver is feeding Android as the mock location, then grant camera, location and motion access. Position comes from your receiver; heading is fixed by sighting a known pole once.</p>
+  <button class="primary" onclick="boot()">Start</button>
+</div>
+
+<video id="video" autoplay muted playsinline></video>
+<canvas id="gl"></canvas>
+<div id="cross"></div>
+
+<div id="hud" class="panel" style="display:none">
+  <div class="col">
+    <div>Fix <span class="tag" id="fixtag">—</span></div>
+    <div>±<b id="acc">—</b> m &nbsp; <span id="latlon" style="opacity:.7">—</span></div>
+  </div>
+  <div class="col" style="text-align:right">
+    <div>Nearest <b id="nearp">—</b></div>
+    <div><b id="neard">—</b> m &nbsp; Hdg <span id="hstat" class="warn">uncal</span></div>
+  </div>
+</div>
+
+<div id="ctrl" class="panel" style="display:none">
+  <div class="row">
+    <span>Sight pole</span>
+    <select id="poleSel"></select>
+    <button class="primary" id="lockBtn">Lock heading</button>
+  </div>
+  <div class="row">
+    <span style="white-space:nowrap">Eye&nbsp;h <b id="ehv">1.6</b>m</span>
+    <input type="range" id="eye" min="1.0" max="2.0" step="0.05" value="1.6">
+    <span style="white-space:nowrap">V&nbsp;trim <b id="vov">0.0</b>m</span>
+    <input type="range" id="voff" min="-30" max="30" step="0.5" value="0">
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ---------- survey data (GDA2020) ----------
+const POLES=[{"name":"Pole 5","lat":-33.61146057,"lon":150.78144817,"groundRL":40.81,"attachRL":51.81},
+{"name":"Pole 6","lat":-33.61172621,"lon":150.78082493,"groundRL":39.83,"attachRL":50.83},
+{"name":"Pole 7","lat":-33.61196512,"lon":150.78017005,"groundRL":39.66,"attachRL":50.66},
+{"name":"Pole 8","lat":-33.61237402,"lon":150.7802447,"groundRL":39.74,"attachRL":50.74},
+{"name":"Pole 9","lat":-33.61283458,"lon":150.78043442,"groundRL":39.55,"attachRL":50.55}];
+const COND=[[-33.61146057,150.78144817,51.81],[-33.61148101,150.78140023,51.37],[-33.61150144,150.78135229,50.98],[-33.61152187,150.78130434,50.66],[-33.61154231,150.7812564,50.4],[-33.61156274,150.78120846,50.2],[-33.61158317,150.78116052,50.07],[-33.61160361,150.78111258,49.99],[-33.61162404,150.78106464,49.98],[-33.61164447,150.7810167,50.03],[-33.61166491,150.78096876,50.13],[-33.61168534,150.78092082,50.3],[-33.61170577,150.78087287,50.54],[-33.61172621,150.78082493,50.83],[-33.61174458,150.78077456,50.44],[-33.61176296,150.78072418,50.11],[-33.61178134,150.78067381,49.85],[-33.61179972,150.78062343,49.65],[-33.6118181,150.78057306,49.51],[-33.61183647,150.78052268,49.43],[-33.61185485,150.7804723,49.42],[-33.61187323,150.78042193,49.47],[-33.61189161,150.78037155,49.58],[-33.61190998,150.78032118,49.76],[-33.61192836,150.7802708,50.0],[-33.61194674,150.78022043,50.3],[-33.61196512,150.78017005,50.66],[-33.61199657,150.78017579,50.41],[-33.61202803,150.78018154,50.19],[-33.61205948,150.78018728,50.03],[-33.61209093,150.78019302,49.9],[-33.61212239,150.78019876,49.82],[-33.61215384,150.7802045,49.78],[-33.6121853,150.78021025,49.79],[-33.61221675,150.78021599,49.84],[-33.6122482,150.78022173,49.93],[-33.61227966,150.78022747,50.07],[-33.61231111,150.78023322,50.25],[-33.61234257,150.78023896,50.47],[-33.61237402,150.7802447,50.74],[-33.61240945,150.78025929,50.42],[-33.61244488,150.78027389,50.15],[-33.6124803,150.78028848,49.93],[-33.61251573,150.78030307,49.76],[-33.61255116,150.78031767,49.64],[-33.61258659,150.78033226,49.58],[-33.61262201,150.78034685,49.56],[-33.61265744,150.78036145,49.6],[-33.61269287,150.78037604,49.69],[-33.6127283,150.78039063,49.83],[-33.61276372,150.78040523,50.02],[-33.61279915,150.78041982,50.26],[-33.61283458,150.78043442,50.55]];
+const ORIGIN={lat:-33.61196512,lon:150.78017005,rl:39.66}; // Pole 7
+
+// ---------- ENU helpers (true-north, equirectangular around origin) ----------
+const D2R=Math.PI/180, R=6378137, cosLat0=Math.cos(ORIGIN.lat*D2R);
+function enu(lat,lon){return {e:(lon-ORIGIN.lon)*D2R*R*cosLat0, n:(lat-ORIGIN.lat)*D2R*R};}
+// Three world frame: x=East, y=Up, z=-North
+
+let scene,camera,renderer,video;
+let camE=0,camN=0;                 // current camera ENU (horizontal) from GNSS
+let eyeH=1.6, vTrim=0;
+let oAlpha=null,oBeta=0,oGamma=0,screenAng=0,haveOri=false;
+let headingOffset=0, calibrated=false;
+const poleENU=POLES.map(p=>({...p,...enu(p.lat,p.lon)}));
+
+function boot(){
+  document.getElementById('start').style.display='none';
+  document.getElementById('hud').style.display='flex';
+  document.getElementById('ctrl').style.display='block';
+  startCamera(); initThree(); buildScene(); startSensors(); animate();
+  // pole selector
+  const sel=document.getElementById('poleSel');
+  poleENU.forEach((p,i)=>{const o=document.createElement('option');o.value=i;o.textContent=p.name;sel.appendChild(o);});
+  document.getElementById('lockBtn').onclick=()=>calibrate(parseInt(sel.value));
+  document.getElementById('eye').oninput=e=>{eyeH=parseFloat(e.target.value);document.getElementById('ehv').textContent=eyeH.toFixed(2);};
+  document.getElementById('voff').oninput=e=>{vTrim=parseFloat(e.target.value);document.getElementById('vov').textContent=vTrim.toFixed(1);};
+}
+
+async function startCamera(){
+  video=document.getElementById('video');
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    video.srcObject=s;
+  }catch(err){alert('Camera error: '+err.message);}
+}
+
+function initThree(){
+  const c=document.getElementById('gl');
+  renderer=new THREE.WebGLRenderer({canvas:c,alpha:true,antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.setSize(innerWidth,innerHeight);
+  scene=new THREE.Scene();
+  camera=new THREE.PerspectiveCamera(67,innerWidth/innerHeight,0.1,3000);
+  camera.position.set(0,eyeH,0);
+  scene.add(new THREE.HemisphereLight(0xffffff,0x404040,1.1));
+  const d=new THREE.DirectionalLight(0xffffff,.6);d.position.set(50,120,40);scene.add(d);
+  addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+}
+
+function label(text){
+  const cv=document.createElement('canvas');cv.width=256;cv.height=64;const x=cv.getContext('2d');
+  x.fillStyle='rgba(18,51,89,.85)';x.fillRect(0,0,256,64);
+  x.strokeStyle='#F5F259';x.lineWidth=3;x.strokeRect(2,2,252,60);
+  x.fillStyle='#fff';x.font='bold 34px Arial';x.textAlign='center';x.textBaseline='middle';x.fillText(text,128,34);
+  const t=new THREE.CanvasTexture(cv);const m=new THREE.SpriteMaterial({map:t,depthTest:false});
+  const s=new THREE.Sprite(m);s.scale.set(6,1.5,1);return s;
+}
+
+function buildScene(){
+  const yr=rl=>rl-ORIGIN.rl;             // RL(AHD) -> Three Y
+  // poles
+  poleENU.forEach(p=>{
+    const h=p.attachRL-p.groundRL;
+    const g=new THREE.CylinderGeometry(0.18,0.22,h,12);
+    const m=new THREE.MeshLambertMaterial({color:0x8a6a4a});
+    const pole=new THREE.Mesh(g,m);
+    pole.position.set(p.e, yr(p.groundRL)+h/2, -p.n);
+    scene.add(pole);
+    const lab=label(p.name);
+    lab.position.set(p.e, yr(p.attachRL)+1.4, -p.n);
+    scene.add(lab);
+    // ground ring
+    const ring=new THREE.Mesh(new THREE.RingGeometry(0.4,0.6,20),
+      new THREE.MeshBasicMaterial({color:0xF5F259,side:THREE.DoubleSide}));
+    ring.rotation.x=-Math.PI/2;ring.position.set(p.e,yr(p.groundRL)+0.02,-p.n);scene.add(ring);
+  });
+  // conductor curve (split at pole vertices into separate spans to avoid corner rounding)
+  const pts=COND.map(c=>{const u=enu(c[0],c[1]);return new THREE.Vector3(u.e,yr(c[2]),-u.n);});
+  const curve=new THREE.CatmullRomCurve3(pts,false,'catmullrom',0.0);
+  const cond=new THREE.Mesh(new THREE.TubeGeometry(curve,260,0.13,8,false),
+    new THREE.MeshBasicMaterial({color:0xF5F259}));
+  scene.add(cond);
+  // 5 m clearance envelope
+  const env=new THREE.Mesh(new THREE.TubeGeometry(curve,260,5,16,false),
+    new THREE.MeshBasicMaterial({color:0xc0392b,transparent:true,opacity:0.18,side:THREE.DoubleSide,depthWrite:false}));
+  scene.add(env);
+}
+
+function startSensors(){
+  // location (mocked GNSS comes through here)
+  if(navigator.geolocation){
+    navigator.geolocation.watchPosition(pos=>{
+      const {latitude,longitude,accuracy}=pos.coords;
+      const u=enu(latitude,longitude);camE=u.e;camN=u.n;
+      document.getElementById('acc').textContent=accuracy?accuracy.toFixed(2):'—';
+      document.getElementById('latlon').textContent=latitude.toFixed(7)+', '+longitude.toFixed(7);
+      document.getElementById('fixtag').textContent=accuracy&&accuracy<0.5?'RTK':(accuracy&&accuracy<2?'float/DGPS':'GNSS');
+    },err=>{document.getElementById('fixtag').textContent='no fix';},
+    {enableHighAccuracy:true,maximumAge:200,timeout:10000});
+  }
+  // orientation
+  function handler(ev){
+    if(ev.alpha==null)return;
+    oAlpha=ev.alpha*D2R;oBeta=(ev.beta||0)*D2R;oGamma=(ev.gamma||0)*D2R;haveOri=true;
+  }
+  function attach(){
+    screenAng=((screen.orientation&&screen.orientation.angle)||window.orientation||0)*D2R;
+    addEventListener('orientationchange',()=>{screenAng=((screen.orientation&&screen.orientation.angle)||window.orientation||0)*D2R;});
+    if('ondeviceorientationabsolute' in window)
+      addEventListener('deviceorientationabsolute',handler,true);
+    else addEventListener('deviceorientation',handler,true);
+  }
+  if(typeof DeviceOrientationEvent!=='undefined' && DeviceOrientationEvent.requestPermission){
+    DeviceOrientationEvent.requestPermission().then(r=>{if(r==='granted')attach();}).catch(()=>attach());
+  } else attach();
+}
+
+// device orientation -> quaternion (THREE.DeviceOrientationControls convention)
+const zee=new THREE.Vector3(0,0,1),eu=new THREE.Euler(),q0=new THREE.Quaternion(),
+      q1=new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5)),yawQ=new THREE.Quaternion(),
+      upY=new THREE.Vector3(0,1,0);
+function deviceQuat(out){
+  eu.set(oBeta,oAlpha,-oGamma,'YXZ');
+  out.setFromEuler(eu);out.multiply(q1);out.multiply(q0.setFromAxisAngle(zee,-screenAng));
+}
+
+function calibrate(i){
+  const p=poleENU[i];
+  const dir=new THREE.Vector3();camera.getWorldDirection(dir);
+  const camAz=Math.atan2(dir.x,-dir.z);            // 0=N, +=E
+  const desAz=Math.atan2(p.e-camE,p.n-camN);
+  headingOffset+=(desAz-camAz);
+  calibrated=true;
+  const hs=document.getElementById('hstat');hs.textContent='locked';hs.className='';
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  // camera position: horizontal from GNSS, vertical = eye height + trim (AHD-anchored scene)
+  camera.position.set(camE, eyeH+vTrim, -camN);
+  // orientation
+  if(haveOri && oAlpha!=null){
+    deviceQuat(camera.quaternion);
+    yawQ.setFromAxisAngle(upY,headingOffset);
+    camera.quaternion.premultiply(yawQ);
+  }
+  // nearest pole readout
+  let best=1e9,bn='—';
+  poleENU.forEach(p=>{const d=Math.hypot(p.e-camE,p.n-camN);if(d<best){best=d;bn=p.name;}});
+  document.getElementById('nearp').textContent=bn;
+  document.getElementById('neard').textContent=best.toFixed(1);
+  renderer.render(scene,camera);
+}
+</script>
+</body>
+</html>
